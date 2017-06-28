@@ -26,7 +26,7 @@ var (
 		"last_31_days": -31 * 24 * time.Hour,
 	}
 	kMidnight = time.Date(2017, 6, 20, 0, 0, 0, 0, time.UTC)
-	kNow      = time.Date(2017, 6, 26, 12, 0, 0, 0, time.UTC)
+	kNow      = time.Date(2017, 6, 20, 12, 0, 0, 0, time.UTC)
 )
 
 // fake CH implementation. Returns entries every hour on the hour.
