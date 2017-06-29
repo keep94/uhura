@@ -40,9 +40,13 @@ type fakeCHType struct {
 
 	// expected asset Id
 	AssetId string
+
+	// number of times Fetch called
+	CallCount int
 }
 
 func (ch *fakeCHType) Fetch(rawUrl string) ([]*chreader.Entry, string, error) {
+	ch.CallCount++
 	url, err := url.Parse(rawUrl)
 	if err != nil {
 		return nil, "", err
@@ -140,6 +144,7 @@ func TestReader(t *testing.T) {
 					kAssetId, kNow, kNow.Add(20*time.Hour))
 				So(entries, ShouldBeEmpty)
 				So(err, ShouldBeNil)
+				So(fakeCh.CallCount, ShouldEqual, 1)
 			})
 			Convey("Today range", func() {
 				entries, err := reader.Read(
@@ -150,6 +155,7 @@ func TestReader(t *testing.T) {
 					kMidnight,
 					kMidnight.Add(3*time.Hour))
 				So(err, ShouldBeNil)
+				So(fakeCh.CallCount, ShouldEqual, 1)
 			})
 			Convey("Yesterday and today range", func() {
 				entries, err := reader.Read(
@@ -160,6 +166,7 @@ func TestReader(t *testing.T) {
 					kMidnight.Add(-4*time.Hour),
 					kNow)
 				So(err, ShouldBeNil)
+				So(fakeCh.CallCount, ShouldEqual, 2)
 			})
 			Convey("Before yesterday", func() {
 				entries, err := reader.Read(
@@ -172,6 +179,7 @@ func TestReader(t *testing.T) {
 					kMidnight.Add(-25*time.Hour),
 					kMidnight.Add(-20*time.Hour))
 				So(err, ShouldBeNil)
+				So(fakeCh.CallCount, ShouldEqual, 1)
 			})
 			Convey("7 days ago", func() {
 				entries, err := reader.Read(
@@ -184,6 +192,9 @@ func TestReader(t *testing.T) {
 					kMidnight.Add(-160*time.Hour),
 					kMidnight.Add(-20*time.Hour))
 				So(err, ShouldBeNil)
+
+				// 100 hour batches
+				So(fakeCh.CallCount, ShouldEqual, 2)
 			})
 			Convey("14 days ago", func() {
 				entries, err := reader.Read(
@@ -196,6 +207,7 @@ func TestReader(t *testing.T) {
 					kMidnight.Add(-169*time.Hour),
 					kMidnight.Add(-167*time.Hour))
 				So(err, ShouldBeNil)
+				So(fakeCh.CallCount, ShouldEqual, 2)
 			})
 			Convey("31 days ago and today", func() {
 				entries, err := reader.Read(
@@ -208,6 +220,9 @@ func TestReader(t *testing.T) {
 					kMidnight.Add(-400*time.Hour),
 					kMidnight.Add(3*time.Hour))
 				So(err, ShouldBeNil)
+
+				// 31*24=744 =8 batches + today
+				So(fakeCh.CallCount, ShouldEqual, 9)
 			})
 			Convey("Way in the past", func() {
 				entries, err := reader.Read(
@@ -240,7 +255,106 @@ func TestReader(t *testing.T) {
 }
 
 func TestTimeSkew(t *testing.T) {
-	// TODO
+	Convey("cloudhealth server is one day earlier. Calling 'today' on cloud health server gives yesterday's data", t, func() {
+		fakeCh := &fakeCHType{
+			CurrentTime: kMidnight.Add(-1 * time.Minute),
+			ApiKey:      kApiKey,
+			AssetId:     kAssetId}
+		reader := chreader.NewCustomReader(
+			chreader.Config{
+				ApiKey: kApiKey,
+			},
+			fakeCh,
+			func() time.Time {
+				return kNow
+			},
+		)
+		Convey("Get yesterday's data", func() {
+			entries, err := reader.Read(
+				kAssetId, kMidnight.Add(-270*time.Minute), kMidnight)
+			So(
+				entries,
+				shouldHaveRange,
+				kMidnight.Add(-4*time.Hour),
+				kMidnight)
+			So(err, ShouldBeNil)
+			// We end up calling "yesterday" and "today" on cloudhealth server
+			// just to get yesterday's data
+			So(fakeCh.CallCount, ShouldEqual, 2)
+		})
+		Convey("Get data from 2 days ago", func() {
+			entries, err := reader.Read(
+				kAssetId, kMidnight.Add(-48*time.Hour), kMidnight.Add(-25*time.Hour))
+			So(
+				entries,
+				shouldHaveRange,
+				kMidnight.Add(-48*time.Hour),
+				kMidnight.Add(-25*time.Hour))
+			So(err, ShouldBeNil)
+			// We call "last_2_days" on cloud health but get back
+			// 3 days ago to yesterday which has everything we need.
+			So(fakeCh.CallCount, ShouldEqual, 1)
+		})
+		Convey("Get data from 2 days ago up to 1 day ago", func() {
+			entries, err := reader.Read(
+				kAssetId, kMidnight.Add(-48*time.Hour), kMidnight.Add(-24*time.Hour))
+			So(
+				entries,
+				shouldHaveRange,
+				kMidnight.Add(-48*time.Hour),
+				kMidnight.Add(-24*time.Hour))
+			So(err, ShouldBeNil)
+			// We call "last_2_days" on cloud health but get back
+			// 3 days ago to yesterday, but since we don't see anything
+			// after our end time, we also get "today" data which is
+			// really yesterday's data.
+			So(fakeCh.CallCount, ShouldEqual, 2)
+		})
+	})
+	Convey("cloudhealth server one day after. Calling yesterday on cloudhealth gives today's data", t, func() {
+		fakeCh := &fakeCHType{
+			CurrentTime: kMidnight.Add(24 * time.Hour).Add(time.Minute),
+			ApiKey:      kApiKey,
+			AssetId:     kAssetId}
+		reader := chreader.NewCustomReader(
+			chreader.Config{
+				ApiKey: kApiKey,
+			},
+			fakeCh,
+			func() time.Time {
+				return kNow
+			},
+		)
+		Convey("start on what we think is today", func() {
+			entries, err := reader.Read(
+				kAssetId, kMidnight, kMidnight.Add(3*time.Hour))
+			So(
+				entries,
+				shouldHaveRange,
+				kMidnight,
+				kMidnight.Add(3*time.Hour))
+			So(err, ShouldBeNil)
+			// We try calling "today" on cloudhealth but find we have to
+			// call "yesterday" to get today's data
+			So(fakeCh.CallCount, ShouldEqual, 2)
+		})
+		Convey("Get data from 2 days go though midnight today", func() {
+			entries, err := reader.Read(
+				kAssetId, kMidnight.Add(-48*time.Hour), kMidnight)
+			So(
+				entries,
+				shouldHaveRange,
+				kMidnight.Add(-48*time.Hour),
+				kMidnight)
+			So(err, ShouldBeNil)
+			// We try calling last_2_days cloudhealth but we just get
+			// yesterdays data. So we have to call last_7_days which
+			// gives us 6 days ago until tomorrow
+			// 6 days = 144 hours = 2 batches
+			// 3 = 2 batches + original "last_2_days" call
+			So(fakeCh.CallCount, ShouldEqual, 3)
+		})
+	})
 }
 
 func shouldHaveRange(actual interface{}, expected ...interface{}) string {
