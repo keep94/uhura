@@ -25,7 +25,7 @@ import (
 )
 
 var (
-	fPort      = flag.Int("port", 4242, "port")
+	fPortNum   = flag.Int("portNum", 4242, "port number")
 	fConfigDir = flag.String("configDir", "/etc/uhura", "config Directory")
 )
 
@@ -151,7 +151,7 @@ func main() {
 					404, errors.New("Endpoint not found"))
 			}))
 	healthserver.SetReady()
-	if err := http.ListenAndServe(fmt.Sprintf(":%d", *fPort), nil); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%d", *fPortNum), nil); err != nil {
 		log.Fatal(err)
 	}
 }
