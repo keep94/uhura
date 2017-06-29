@@ -25,83 +25,148 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 	midnight := time.Date(
 		now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	var entries []*Entry
+
+	// If start is before midnight, use 'yesterday' or 'last_2_days' etc.
 	if start.Before(midnight) {
-		timeRange := computeTimeRange(midnight.Sub(start))
-		var pastEntries []*Entry
-		var err error
-		if end.After(midnight) {
-			pastEntries, err = r.getEntries(assetId, timeRange, start, midnight)
-		} else {
-			pastEntries, err = r.getEntries(assetId, timeRange, start, end)
+
+		// compute what time range to use e.g "last_2_days"
+		timeRangeIdx := computeTimeRangeIdx(midnight.Sub(start))
+
+		// Get all the entries but if the first entry comes after the start
+		// time we might have clock skew so exit early before fetching all the
+		// entries. That is what "true" means.
+		pastEntries, earlyEnough, lateEnough, err := r.getEntries(
+			assetId, currentTimeRange(timeRangeIdx), start, end, true)
+		if err != nil {
+			return nil, err
 		}
+
+		// If we may have clock skew, use the previous time range just to
+		// be sure we have everything. e.g "last_7_days" becomes "last_14_days"
+		if !earlyEnough {
+			pastEntries, _, lateEnough, err = r.getEntries(
+				assetId, previousTimeRange(timeRangeIdx), start, end, false)
+			if err != nil {
+				return nil, err
+			}
+		}
+		entries = append(entries, pastEntries...)
+
+		// If for whatever reason, clock skew or not, we don't read any
+		// entries past the end time, supplement with entries from "today"
+		// we do this because our past entries queries only go up to
+		// midnight of the current day
+		if !lateEnough {
+			todaysEntries, _, _, err := r.getEntries(
+				assetId, "today", start, end, false)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, todaysEntries...)
+		}
+	} else {
+		// start time falls in "today" just get today's entries
+		todaysEntries, earlyEnough, _, err := r.getEntries(
+			assetId, "today", start, end, true)
+		if err != nil {
+			return nil, err
+		}
+		// If we read timestamps on or before start time, we are done
+		if earlyEnough {
+			return todaysEntries, nil
+		}
+
+		// If the earliest entry we read comes after the start time, we may
+		// have clock skew. Supplement with yesterday's entries for good
+		// measure.
+		pastEntries, _, lateEnough, err := r.getEntries(
+			assetId, "yesterday", start, end, false)
 		if err != nil {
 			return nil, err
 		}
 		entries = append(entries, pastEntries...)
-	}
-	if end.After(midnight) {
-		var todaysEntries []*Entry
-		var err error
-		if start.Before(midnight) {
-			todaysEntries, err = r.getEntries(assetId, "today", midnight, end)
-		} else {
-			todaysEntries, err = r.getEntries(assetId, "today", start, end)
+
+		// If we don't read entries past the end time, re-get today's data
+		if !lateEnough {
+			todaysEntriesAgain, _, _, err := r.getEntries(
+				assetId, "today", start, end, false)
+			if err != nil {
+				return nil, err
+			}
+			entries = append(entries, todaysEntriesAgain...)
 		}
-		if err != nil {
-			return nil, err
-		}
-		entries = append(entries, todaysEntries...)
 	}
 	return entries, nil
 }
 
 func (r *chReaderType) getEntries(
 	assetId,
-	timeRange string,
+	timeRange string, // "last_2_days", "last_7_days", etc.
 	start,
-	end time.Time) ([]*Entry, error) {
-	var result []*Entry
-	nextUrl, err := r.appendBatch(
-		r.computeUrlStr(assetId, timeRange), start, end, &result)
+	end time.Time,
+	exitEarly bool) (
+	result []*Entry, earlyEnough bool, lateEnough bool, err error) {
+	var batchEntries []*Entry
+	var nextUrl string
+	batchEntries, nextUrl, err = r.ch.Fetch(r.computeUrlStr(assetId, timeRange))
 	if err != nil {
-		return nil, err
+		return
 	}
+
+	// See if we have fetched an entry that is on or before the start time
+	// If so, set early enough flag
+	if len(batchEntries) > 0 && !batchEntries[0].Time.After(start) {
+		earlyEnough = true
+	} else if exitEarly {
+		// if exit early flag set, exit if we know we aren't early enough
+		return
+	}
+
+	startIdx, endIdx := findRange(batchEntries, start, end)
+	result = append(result, batchEntries[startIdx:endIdx]...)
+
+	// See if we read an entry on or after the end time
+	// If so, we are done.
+	if endIdx < len(batchEntries) {
+		lateEnough = true
+		return
+	}
+
+	// As long as there is a next page
 	for nextUrl != "" {
-		nextUrl, err = r.appendBatch(nextUrl, start, end, &result)
+		batchEntries, nextUrl, err = r.ch.Fetch(nextUrl)
 		if err != nil {
-			return nil, err
+			return
+		}
+		startIdx, endIdx := findRange(batchEntries, start, end)
+		result = append(result, batchEntries[startIdx:endIdx]...)
+
+		// If we read an entry on or after the end time we are done
+		if endIdx < len(batchEntries) {
+			lateEnough = true
+			return
 		}
 	}
-	return result, nil
+	return
 }
 
-func (r *chReaderType) appendBatch(
-	url string, start, end time.Time, sink *[]*Entry) (string, error) {
-	entries, nextUrl, err := r.ch.Fetch(url)
-	if err != nil {
-		return "", err
-	}
+// findRange returns the start and end index to entries that contain only
+// times between start inclusive and end exclusive.
+func findRange(entries []*Entry, start, end time.Time) (
+	startIdx, endIdx int) {
 	elen := len(entries)
-	startIdx := 0
+	startIdx = 0
 	// Find first entry coming on or after start. We don't use binary search
 	// here in case cloudhealth gives us data in unsorted order.
 	for startIdx < elen && entries[startIdx].Time.Before(start) {
 		startIdx++
 	}
-	endIdx := startIdx
+	endIdx = startIdx
 	// Find first entry coming on or after end.
 	for endIdx < elen && entries[endIdx].Time.Before(end) {
 		endIdx++
 	}
-
-	// add entries to sink
-	*sink = append(*sink, entries[startIdx:endIdx]...)
-
-	// This batch goes past end. Return empty next url to signal we are done.
-	if endIdx < elen {
-		return "", nil
-	}
-	return nextUrl, nil
+	return
 }
 
 func (r *chReaderType) computeUrlStr(assetId, timeRange string) string {
@@ -127,15 +192,26 @@ var (
 	}
 )
 
-func computeTimeRange(dur time.Duration) string {
+func currentTimeRange(idx int) string {
+	return kTimeRanges[idx].Name
+}
+
+func previousTimeRange(idx int) string {
+	if idx == len(kTimeRanges)-1 {
+		return kTimeRanges[idx].Name
+	}
+	return kTimeRanges[idx+1].Name
+}
+
+func computeTimeRangeIdx(dur time.Duration) int {
 	rangeLen := len(kTimeRanges)
 	idx := sort.Search(
 		rangeLen,
 		func(i int) bool { return kTimeRanges[i].Dur >= dur })
 	if idx == rangeLen {
-		return kTimeRanges[rangeLen-1].Name
+		return rangeLen - 1
 	}
-	return kTimeRanges[idx].Name
+	return idx
 }
 
 func mustParseUrl(urlStr string) *url.URL {
