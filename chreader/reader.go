@@ -1,6 +1,7 @@
 package chreader
 
 import (
+	"errors"
 	"github.com/Symantec/scotty/lib/httputil"
 	"net/url"
 	"sort"
@@ -11,6 +12,10 @@ var (
 	kCHUrl = mustParseUrl("https://chapi.cloudhealthtech.com/metrics/v1")
 )
 
+var (
+	kErrDayChanged = errors.New("chreader: Day changed.")
+)
+
 type chReaderType struct {
 	config Config
 	ch     CH
@@ -19,12 +24,29 @@ type chReaderType struct {
 
 func (r *chReaderType) Read(assetId string, start, end time.Time) (
 	[]*Entry, error) {
+	entries, err := r.read(assetId, start, end)
+
+	// If current day changed on the cloud health servers during our query,
+	// just start over.
+	for err == kErrDayChanged {
+		entries, err = r.read(assetId, start, end)
+	}
+	return entries, err
+}
+
+func (r *chReaderType) read(assetId string, start, end time.Time) (
+	[]*Entry, error) {
 	now := r.now().UTC()
 	start = start.UTC()
 	end = end.UTC()
 	midnight := time.Date(
 		now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
 	var entries []*Entry
+
+	// Here we keep the Time in the Date content header of the last response
+	// from cloudhealth. We use this to raise kErrDayChanged if the current
+	// day on the cloud health servers changes in the middle of our work.
+	var lastBatchTime time.Time // zero value means no value
 
 	// If start is before midnight, use 'yesterday' or 'last_2_days' etc.
 	if start.Before(midnight) {
@@ -36,7 +58,12 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 		// time we might have clock skew so exit early before fetching all the
 		// entries. That is what "true" means.
 		pastEntries, earlyEnough, lateEnough, err := r.getEntries(
-			assetId, currentTimeRange(timeRangeIdx), start, end, true)
+			assetId,
+			currentTimeRange(timeRangeIdx),
+			start,
+			end,
+			&lastBatchTime,
+			true)
 		if err != nil {
 			return nil, err
 		}
@@ -45,7 +72,12 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 		// be sure we have everything. e.g "last_7_days" becomes "last_14_days"
 		if !earlyEnough {
 			pastEntries, _, lateEnough, err = r.getEntries(
-				assetId, previousTimeRange(timeRangeIdx), start, end, false)
+				assetId,
+				previousTimeRange(timeRangeIdx),
+				start,
+				end,
+				&lastBatchTime,
+				false)
 			if err != nil {
 				return nil, err
 			}
@@ -58,7 +90,7 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 		// midnight of the current day
 		if !lateEnough {
 			todaysEntries, _, _, err := r.getEntries(
-				assetId, "today", start, end, false)
+				assetId, "today", start, end, &lastBatchTime, false)
 			if err != nil {
 				return nil, err
 			}
@@ -67,7 +99,7 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 	} else {
 		// start time falls in "today" just get today's entries
 		todaysEntries, earlyEnough, _, err := r.getEntries(
-			assetId, "today", start, end, true)
+			assetId, "today", start, end, &lastBatchTime, true)
 		if err != nil {
 			return nil, err
 		}
@@ -80,7 +112,7 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 		// have clock skew. Supplement with yesterday's entries for good
 		// measure.
 		pastEntries, _, lateEnough, err := r.getEntries(
-			assetId, "yesterday", start, end, false)
+			assetId, "yesterday", start, end, &lastBatchTime, false)
 		if err != nil {
 			return nil, err
 		}
@@ -89,7 +121,7 @@ func (r *chReaderType) Read(assetId string, start, end time.Time) (
 		// If we don't read entries past the end time, re-get today's data
 		if !lateEnough {
 			todaysEntriesAgain, _, _, err := r.getEntries(
-				assetId, "today", start, end, false)
+				assetId, "today", start, end, &lastBatchTime, false)
 			if err != nil {
 				return nil, err
 			}
@@ -104,6 +136,7 @@ func (r *chReaderType) getEntries(
 	timeRange string, // "last_2_days", "last_7_days", etc.
 	start,
 	end time.Time,
+	lastBatchTime *time.Time,
 	exitEarly bool) (
 	result []*Entry, earlyEnough bool, lateEnough bool, err error) {
 	var chResult *CHResult
@@ -111,6 +144,18 @@ func (r *chReaderType) getEntries(
 	if err != nil {
 		return
 	}
+	batchTime, pderr := time.Parse(
+		"Mon, 2 Jan 2006 15:04:05 MST", chResult.Date)
+	if pderr == nil {
+		batchTime = batchTime.UTC()
+		if !lastBatchTime.IsZero() && batchTime.Day() != lastBatchTime.Day() {
+			err = kErrDayChanged
+			*lastBatchTime = batchTime
+			return
+		}
+		*lastBatchTime = batchTime
+	}
+
 	batchEntries := chResult.Entries
 	nextUrl := chResult.Next
 
