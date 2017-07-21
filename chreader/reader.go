@@ -106,12 +106,13 @@ func (r *chReaderType) getEntries(
 	end time.Time,
 	exitEarly bool) (
 	result []*Entry, earlyEnough bool, lateEnough bool, err error) {
-	var batchEntries []*Entry
-	var nextUrl string
-	batchEntries, nextUrl, err = r.ch.Fetch(r.computeUrlStr(assetId, timeRange))
+	var chResult *CHResult
+	chResult, err = r.ch.Fetch(r.computeUrlStr(assetId, timeRange))
 	if err != nil {
 		return
 	}
+	batchEntries := chResult.Entries
+	nextUrl := chResult.Next
 
 	// See if we have fetched an entry that is on or before the start time
 	// If so, set early enough flag
@@ -134,10 +135,12 @@ func (r *chReaderType) getEntries(
 
 	// As long as there is a next page
 	for nextUrl != "" {
-		batchEntries, nextUrl, err = r.ch.Fetch(nextUrl)
+		chResult, err = r.ch.Fetch(nextUrl)
 		if err != nil {
 			return
 		}
+		batchEntries = chResult.Entries
+		nextUrl = chResult.Next
 		startIdx, endIdx := findRange(batchEntries, start, end)
 		result = append(result, batchEntries[startIdx:endIdx]...)
 

@@ -14,10 +14,19 @@ type Entry struct {
 	Values map[string]float64
 }
 
+// CHResult represents a result from the cloud health server
+type CHResult struct {
+	Entries []*Entry // The returned entries
+	Next    string   // If non-empty, the URL to retrieve the rest
+
+	// The cloud health server date like 'Mon, 2 Jan 2006 15:04:05 MST'
+	Date string
+}
+
 // CH is the interface for fetching one page of metrics from CloudHealth.
 // Most clients will not need to use this interface.
 type CH interface {
-	Fetch(url string) (entries []*Entry, next string, err error)
+	Fetch(url string) (result *CHResult, err error)
 }
 
 var (
