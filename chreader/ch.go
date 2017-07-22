@@ -39,29 +39,35 @@ type responseType struct {
 type chType struct {
 }
 
-func (c *chType) Fetch(url string) ([]*Entry, string, error) {
+func (c *chType) Fetch(url string) (*CHResult, error) {
 	return fetch(url)
 }
 
-func fetch(url string) ([]*Entry, string, error) {
+func fetch(url string) (*CHResult, error) {
 	var client http.Client
 	resp, err := client.Get(url)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	defer resp.Body.Close()
+	date := resp.Header.Get("Date")
 	// If status code is 400 or greater, assume output is the error
 	if resp.StatusCode >= 400 {
 		var buffer bytes.Buffer
 		buffer.ReadFrom(resp.Body)
-		return nil, "", errors.New(buffer.String())
+		return nil, errors.New(buffer.String())
 	}
 	// Otherwise unmarshal response and extract the metric values
 	res, err := extractResponse(resp.Body)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return extractMetrics(res)
+	result := CHResult{Date: date}
+	result.Entries, result.Next, err = extractMetrics(res)
+	if err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 func extractResponse(reader io.Reader) (*responseType, error) {

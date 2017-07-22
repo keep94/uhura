@@ -45,11 +45,11 @@ type fakeCHType struct {
 	CallCount int
 }
 
-func (ch *fakeCHType) Fetch(rawUrl string) ([]*chreader.Entry, string, error) {
+func (ch *fakeCHType) Fetch(rawUrl string) (*chreader.CHResult, error) {
 	ch.CallCount++
 	url, err := url.Parse(rawUrl)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	values := url.Query()
 	apiKey := values.Get("api_key")
@@ -62,11 +62,11 @@ func (ch *fakeCHType) Fetch(rawUrl string) ([]*chreader.Entry, string, error) {
 		page = 1
 	}
 	if apiKey != ch.ApiKey {
-		return nil, "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"Expected API key '%s', got '%s'", ch.ApiKey, apiKey)
 	}
 	if assetId != ch.AssetId {
-		return nil, "", fmt.Errorf(
+		return nil, fmt.Errorf(
 			"Expected asset '%s', got '%s'", ch.AssetId, assetId)
 	}
 	inUTC := ch.CurrentTime.UTC()
@@ -80,7 +80,7 @@ func (ch *fakeCHType) Fetch(rawUrl string) ([]*chreader.Entry, string, error) {
 	} else {
 		timeAgo, ok := kTimeRangeValues[timeRange]
 		if !ok {
-			return nil, "", fmt.Errorf("time range '%s' not recognised.", timeRange)
+			return nil, fmt.Errorf("time range '%s' not recognised.", timeRange)
 		}
 		entries, nextPage = entriesByPage(
 			entriesFromTo(midnight.Add(timeAgo), midnight),
@@ -88,9 +88,9 @@ func (ch *fakeCHType) Fetch(rawUrl string) ([]*chreader.Entry, string, error) {
 	}
 	if nextPage != 0 {
 		newUrl := httputil.WithParams(url, "page", strconv.Itoa(nextPage))
-		return entries, newUrl.String(), nil
+		return &chreader.CHResult{Entries: entries, Next: newUrl.String()}, nil
 	}
-	return entries, "", nil
+	return &chreader.CHResult{Entries: entries}, nil
 }
 
 func entriesFromTo(start, end time.Time) (entries []*chreader.Entry) {
