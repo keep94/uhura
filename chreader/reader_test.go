@@ -35,6 +35,10 @@ type fakeCHType struct {
 	// The current time.
 	CurrentTime time.Time
 
+	// If non-zero, current time automatically set to this after first
+	// call to Fetch.
+	FutureTime time.Time
+
 	// expected API key
 	ApiKey string
 
@@ -86,11 +90,16 @@ func (ch *fakeCHType) Fetch(rawUrl string) (*chreader.CHResult, error) {
 			entriesFromTo(midnight.Add(timeAgo), midnight),
 			page)
 	}
+	dateStr := ch.CurrentTime.Format("Mon, 2 Jan 2006 15:04:05 GMT")
+	if !ch.FutureTime.IsZero() {
+		ch.CurrentTime = ch.FutureTime
+	}
 	if nextPage != 0 {
 		newUrl := httputil.WithParams(url, "page", strconv.Itoa(nextPage))
-		return &chreader.CHResult{Entries: entries, Next: newUrl.String()}, nil
+		return &chreader.CHResult{
+			Date: dateStr, Entries: entries, Next: newUrl.String()}, nil
 	}
-	return &chreader.CHResult{Entries: entries}, nil
+	return &chreader.CHResult{Entries: entries, Date: dateStr}, nil
 }
 
 func entriesFromTo(start, end time.Time) (entries []*chreader.Entry) {
@@ -353,6 +362,35 @@ func TestTimeSkew(t *testing.T) {
 			// 6 days = 144 hours = 2 batches
 			// 3 = 2 batches + original "last_2_days" call
 			So(fakeCh.CallCount, ShouldEqual, 3)
+		})
+	})
+}
+
+func TestDayChangesMidRequest(t *testing.T) {
+	Convey("cloud health time changes mid request", t, func() {
+		fakeCh := &fakeCHType{
+			CurrentTime: kNow,
+			FutureTime:  kNow.Add(24 * time.Hour),
+			ApiKey:      kApiKey,
+			AssetId:     kAssetId}
+		reader := chreader.NewCustomReader(
+			chreader.Config{
+				ApiKey: kApiKey,
+			},
+			fakeCh,
+			func() time.Time {
+				return kNow
+			},
+		)
+		Convey("Get data from 2 days ago until now", func() {
+			entries, err := reader.Read(
+				kAssetId, kMidnight.Add(-48*time.Hour), kNow)
+			So(
+				entries,
+				shouldHaveRange,
+				kMidnight.Add(-48*time.Hour),
+				kNow)
+			So(err, ShouldBeNil)
 		})
 	})
 }
